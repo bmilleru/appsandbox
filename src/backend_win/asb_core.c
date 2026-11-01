@@ -548,6 +548,8 @@ static void save_vm_list(void)
         fwprintf(f, L"VhdxPath=%s\n", g_vms[i].vhdx_path);
         fwprintf(f, L"RamMB=%lu\n", g_vms[i].ram_mb);
         fwprintf(f, L"HddGB=%lu\n", g_vms[i].hdd_gb);
+        for (int d = 0; d < g_vms[i].additional_disk_count; d++)
+            fwprintf(f, L"AdditionalDisk%dPath=%s\n", d, g_vms[i].additional_disk_paths[d]);
         fwprintf(f, L"CpuCores=%lu\n", g_vms[i].cpu_cores);
         fwprintf(f, L"GpuMode=%d\n", g_vms[i].gpu_mode);
         fwprintf(f, L"GpuName=%s\n", g_vms[i].gpu_name);
@@ -695,6 +697,22 @@ static void load_vm_list(void)
             vm->ram_mb = (DWORD)_wtoi(line + 6);
         else if (wcsncmp(line, L"HddGB=", 6) == 0)
             vm->hdd_gb = (DWORD)_wtoi(line + 6);
+        else if (wcsncmp(line, L"AdditionalDisk", 14) == 0) {
+            int disk_index;
+            wchar_t key[32];
+            for (disk_index = 0; disk_index < ASB_MAX_ADDITIONAL_DISKS; disk_index++) {
+                swprintf_s(key, ARRAYSIZE(key), L"AdditionalDisk%dPath=", disk_index);
+                if (wcsncmp(line, key, wcslen(key)) == 0) {
+                    const wchar_t *disk_path = line + wcslen(key);
+                    if (wcslen(disk_path) < MAX_PATH) {
+                        wcscpy_s(vm->additional_disk_paths[disk_index], MAX_PATH, disk_path);
+                        if (vm->additional_disk_count <= disk_index)
+                            vm->additional_disk_count = disk_index + 1;
+                    }
+                    break;
+                }
+            }
+        }
         else if (wcsncmp(line, L"CpuCores=", 9) == 0)
             vm->cpu_cores = (DWORD)_wtoi(line + 9);
         else if (wcsncmp(line, L"GpuMode=", 8) == 0)
@@ -3723,6 +3741,10 @@ ASB_API HRESULT asb_vm_start(AsbVm vm, int snap_idx, int branch_idx,
         wcscpy_s(args->config.os_type, 32, inst->os_type);
         wcscpy_s(args->config.image_path, MAX_PATH, inst->image_path);
         wcscpy_s(args->config.vhdx_path, MAX_PATH, inst->vhdx_path);
+        args->config.additional_disk_count = inst->additional_disk_count;
+        for (int d = 0; d < inst->additional_disk_count; d++)
+            wcscpy_s(args->config.additional_disk_paths[d], MAX_PATH,
+                     inst->additional_disk_paths[d]);
         args->config.ram_mb = inst->ram_mb;
         args->config.hdd_gb = inst->hdd_gb;
         args->config.cpu_cores = inst->cpu_cores;
@@ -3760,6 +3782,112 @@ ASB_API HRESULT asb_vm_start(AsbVm vm, int snap_idx, int branch_idx,
         if (g_state_cb) g_state_cb(vm, TRUE, g_state_ud);
     }
 
+    return S_OK;
+}
+
+static BOOL path_is_within_directory(const wchar_t *path, const wchar_t *directory)
+{
+    size_t len;
+    if (!path || !directory || !directory[0]) return FALSE;
+    len = wcslen(directory);
+    while (len > 3 && (directory[len - 1] == L'\\' || directory[len - 1] == L'/'))
+        len--;
+    if (_wcsnicmp(path, directory, len) != 0) return FALSE;
+    return path[len] == L'\0' || path[len] == L'\\' || path[len] == L'/';
+}
+
+ASB_API HRESULT asb_vm_add_disk(AsbVm vm, const wchar_t *disk_path)
+{
+    VmInstance *inst = vm_inst(vm);
+    wchar_t full_path[MAX_PATH], owned_root[MAX_PATH];
+    const wchar_t *file_name, *extension;
+    DWORD attrs, path_len;
+    ULONGLONG virtual_size;
+    int disk_index, i, d;
+    HRESULT hr;
+
+    if (!inst || !disk_path || !disk_path[0]) return E_INVALIDARG;
+    if (inst->running || inst->shutdown_requested || inst->building_vhdx || inst->is_template) {
+        asb_alert(L"A virtual disk can only be added to a stopped, fully built VM.");
+        return E_INVALIDARG;
+    }
+    if (inst->additional_disk_count >= ASB_MAX_ADDITIONAL_DISKS) {
+        asb_alert(L"This VM already has the maximum number of additional disks.");
+        return E_OUTOFMEMORY;
+    }
+    path_len = GetFullPathNameW(disk_path, MAX_PATH, full_path, NULL);
+    attrs = path_len && path_len < MAX_PATH ? GetFileAttributesW(full_path) : INVALID_FILE_ATTRIBUTES;
+    if (wcslen(disk_path) >= MAX_PATH || wcspbrk(disk_path, L"\r\n") ||
+        !path_len || path_len >= MAX_PATH || attrs == INVALID_FILE_ATTRIBUTES ||
+        (attrs & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT))) {
+        asb_alert(L"Select an existing VHDX file with a valid path.");
+        return E_INVALIDARG;
+    }
+    file_name = wcsrchr(full_path, L'\\');
+    file_name = file_name ? file_name + 1 : full_path;
+    extension = wcsrchr(file_name, L'.');
+    if (!extension || _wcsicmp(extension, L".vhdx") != 0) {
+        asb_alert(L"Windows hosts can attach existing VHDX disk images.");
+        return E_INVALIDARG;
+    }
+    hr = vhdx_get_virtual_size(full_path, &virtual_size);
+    if (FAILED(hr) || virtual_size == 0) {
+        asb_log(L"Error: Cannot read VHDX disk image %s (0x%08X).", full_path, hr);
+        asb_alert(L"The selected file is not a readable VHDX disk image.");
+        return FAILED(hr) ? hr : E_INVALIDARG;
+    }
+
+    for (i = 0; i < g_vm_count; i++) {
+        if (get_vm_disk_root(g_vms[i].vhdx_path, owned_root) &&
+            path_is_within_directory(full_path, owned_root)) {
+            asb_alert(L"Choose a disk image outside App Sandbox's VM storage folders so the source remains untouched when a VM is deleted.");
+            return E_INVALIDARG;
+        }
+        for (d = 0; d < g_vms[i].additional_disk_count; d++) {
+            if (_wcsicmp(full_path, g_vms[i].additional_disk_paths[d]) == 0) {
+                asb_alert(L"This VHDX is already attached to another VM.");
+                return E_INVALIDARG;
+            }
+        }
+    }
+    for (i = 0; i < g_template_count; i++) {
+        if (get_vm_disk_root(g_templates[i].vhdx_path, owned_root) &&
+            path_is_within_directory(full_path, owned_root)) {
+            asb_alert(L"Choose a disk image outside App Sandbox's VM storage folders so the source remains untouched when a VM is deleted.");
+            return E_INVALIDARG;
+        }
+    }
+    disk_index = inst->additional_disk_count;
+    wcscpy_s(inst->additional_disk_paths[disk_index], MAX_PATH, full_path);
+    inst->additional_disk_count++;
+    if (inst->handle) hcs_close_vm(inst);
+    save_vm_list();
+    asb_log(L"Attached existing VHDX disk: %s", full_path);
+    return S_OK;
+}
+
+ASB_API HRESULT asb_vm_remove_disk(AsbVm vm, int disk_index)
+{
+    VmInstance *inst = vm_inst(vm);
+    if (!inst) return E_INVALIDARG;
+    if (disk_index < 0 || disk_index >= inst->additional_disk_count) {
+        asb_alert(L"Select an attached disk to detach.");
+        return E_INVALIDARG;
+    }
+    if (inst->running || inst->shutdown_requested || inst->building_vhdx ||
+        inst->is_template) {
+        asb_alert(L"A virtual disk can only be detached from a stopped VM.");
+        return E_INVALIDARG;
+    }
+
+    asb_log(L"Detached existing VHDX disk: %s", inst->additional_disk_paths[disk_index]);
+    for (int d = disk_index; d + 1 < inst->additional_disk_count; d++)
+        wcscpy_s(inst->additional_disk_paths[d], MAX_PATH,
+                 inst->additional_disk_paths[d + 1]);
+    inst->additional_disk_count--;
+    inst->additional_disk_paths[inst->additional_disk_count][0] = L'\0';
+    if (inst->handle) hcs_close_vm(inst);
+    save_vm_list();
     return S_OK;
 }
 

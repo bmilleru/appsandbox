@@ -4,6 +4,10 @@
 #include <windows.h>
 #include "gpu_enum.h"
 
+#ifndef ASB_MAX_ADDITIONAL_DISKS
+#define ASB_MAX_ADDITIONAL_DISKS 8
+#endif
+
 /* DLL export/import */
 #ifndef ASB_API
 #ifdef ASB_BUILDING_DLL
@@ -43,6 +47,8 @@ typedef struct {
     wchar_t admin_user[128];      /* Guest local admin username */
     wchar_t admin_pass[256];      /* Guest local admin password */
     wchar_t resources_iso_path[MAX_PATH]; /* ISO with autounattend + agent + helpers */
+    int     additional_disk_count;
+    wchar_t additional_disk_paths[ASB_MAX_ADDITIONAL_DISKS][MAX_PATH];
     GpuDriverShareList gpu_shares;         /* Plan9 shares for GPU driver files */
     BOOL    is_template;              /* TRUE = template creation (no GPU/network) */
     BOOL    test_mode;               /* TRUE = disable Secure Boot (for test-signed drivers) */
@@ -63,6 +69,8 @@ typedef struct {
     wchar_t     name[256];
     wchar_t     os_type[32];
     wchar_t     vhdx_path[MAX_PATH];
+    int         additional_disk_count;
+    wchar_t     additional_disk_paths[ASB_MAX_ADDITIONAL_DISKS][MAX_PATH];
     wchar_t     image_path[MAX_PATH];
     DWORD       ram_mb;
     DWORD       hdd_gb;

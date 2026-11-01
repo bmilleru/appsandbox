@@ -26,6 +26,8 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
+#include <sys/stat.h>
 
 /* ---- Global state ---- */
 
@@ -211,6 +213,8 @@ static void save_vm_list(void) {
             fprintf(f, "DiskDirectory=%s\n", g_vms[i].disk_directory);
         fprintf(f, "RamMB=%d\n", g_vms[i].ram_mb);
         fprintf(f, "HddGB=%d\n", g_vms[i].hdd_gb);
+        for (int d = 0; d < g_vms[i].additional_disk_count; d++)
+            fprintf(f, "AdditionalDisk%dPath=%s\n", d, g_vms[i].additional_disk_paths[d]);
         fprintf(f, "CpuCores=%d\n", g_vms[i].cpu_cores);
         fprintf(f, "GpuMode=%d\n", g_vms[i].gpu_mode);
         fprintf(f, "NetworkMode=%d\n", g_vms[i].network_mode);
@@ -288,6 +292,17 @@ static void load_vm_list(void) {
             vm->ram_mb = atoi(line + 6);
         else if (strncmp(line, "HddGB=", 6) == 0)
             vm->hdd_gb = atoi(line + 6);
+        else if (strncmp(line, "AdditionalDisk", 14) == 0) {
+            int disk_index;
+            char disk_path[1024];
+            if (sscanf(line, "AdditionalDisk%dPath=%1023[^\n]", &disk_index, disk_path) == 2 &&
+                disk_index >= 0 && disk_index < ASB_MAX_ADDITIONAL_DISKS) {
+                strlcpy(vm->additional_disk_paths[disk_index], disk_path,
+                        sizeof(vm->additional_disk_paths[disk_index]));
+                if (vm->additional_disk_count <= disk_index)
+                    vm->additional_disk_count = disk_index + 1;
+            }
+        }
         else if (strncmp(line, "CpuCores=", 9) == 0)
             vm->cpu_cores = atoi(line + 9);
         else if (strncmp(line, "GpuMode=", 8) == 0) {
@@ -1351,10 +1366,14 @@ int asb_mac_vm_start(const char *name) {
         if (g_vms[idx].running || g_qemu_refs[idx]) return BACKEND_ERR_ALREADY_RUNNING;
         NSString *nsName = [NSString stringWithUTF8String:name];
         NSURL *vmDir = [VmDir directoryForVm:nsName];
+        NSMutableArray<NSString *> *additionalDiskPaths = [NSMutableArray array];
+        for (int d = 0; d < g_vms[idx].additional_disk_count; d++)
+            [additionalDiskPaths addObject:@(g_vms[idx].additional_disk_paths[d])];
         QemuVm *qvm = [[QemuVm alloc] initWithName:nsName
                                              vmDir:vmDir
                                              ramMb:g_vms[idx].ram_mb
                                           cpuCores:g_vms[idx].cpu_cores
+                              additionalDiskPaths:additionalDiskPaths
                                         macAddress:macAddress.string
                                           testMode:g_vms[idx].test_mode];
         g_qemu_refs[idx] = qvm;
@@ -1393,10 +1412,14 @@ int asb_mac_vm_start(const char *name) {
     post_log("[%s] Loading VM configuration...", name);
 
     NSError *err = nil;
+    NSMutableArray<NSString *> *additionalDiskPaths = [NSMutableArray array];
+    for (int d = 0; d < g_vms[idx].additional_disk_count; d++)
+        [additionalDiskPaths addObject:@(g_vms[idx].additional_disk_paths[d])];
     VzVm *vm = [VzVm loadVmNamed:nsName
                             ramMb:g_vms[idx].ram_mb
                          cpuCores:g_vms[idx].cpu_cores
                        macAddress:macAddress
+               additionalDiskPaths:additionalDiskPaths
                             error:&err];
     if (!vm) {
         post_log("[%s] Load failed: %s", name,
@@ -1434,6 +1457,115 @@ int asb_mac_vm_start(const char *name) {
         });
     }];
 
+    return BACKEND_OK;
+}
+
+static BOOL same_file_at_paths(NSString *left, NSString *right) {
+    struct stat left_stat, right_stat;
+    return left.length && right.length &&
+        stat(left.fileSystemRepresentation, &left_stat) == 0 &&
+        stat(right.fileSystemRepresentation, &right_stat) == 0 &&
+        left_stat.st_dev == right_stat.st_dev && left_stat.st_ino == right_stat.st_ino;
+}
+
+static BOOL path_is_within_directory(NSString *path, NSString *directory) {
+    NSString *root = directory.stringByResolvingSymlinksInPath.stringByStandardizingPath;
+    NSString *candidate = path.stringByResolvingSymlinksInPath.stringByStandardizingPath;
+    if ([candidate isEqualToString:root]) return YES;
+    NSString *prefix = [root hasSuffix:@"/"] ? root : [root stringByAppendingString:@"/"];
+    return [candidate hasPrefix:prefix];
+}
+
+int asb_mac_vm_add_disk(const char *name, const char *disk_path) {
+    if (!name || !disk_path || !disk_path[0]) return BACKEND_ERR_INVALID_ARG;
+    int idx = vm_index_of(name);
+    if (idx < 0) return BACKEND_ERR_NOT_FOUND;
+    AsbVmMac *vm = &g_vms[idx];
+    if (vm->running || vm->shutting_down || vm->vz_handle || g_qemu_refs[idx] ||
+        (!vm->disk_built && vm->install_progress >= 0)) {
+        post_alert(name, "A virtual disk can only be added when the VM is stopped and its disk build has finished.");
+        return BACKEND_ERR_FAILED;
+    }
+    if (vm->additional_disk_count >= ASB_MAX_ADDITIONAL_DISKS) {
+        post_alert(name, "This VM already has the maximum number of additional disks.");
+        return BACKEND_ERR_FAILED;
+    }
+
+    NSString *selectedPath = [NSString stringWithUTF8String:disk_path];
+    if (!selectedPath || !selectedPath.isAbsolutePath ||
+        [selectedPath rangeOfCharacterFromSet:[NSCharacterSet controlCharacterSet]].location != NSNotFound) {
+        post_alert(name, "Select an existing disk image with a valid absolute path.");
+        return BACKEND_ERR_INVALID_ARG;
+    }
+    NSString *canonicalPath = selectedPath.stringByStandardizingPath.stringByResolvingSymlinksInPath;
+    if ([canonicalPath lengthOfBytesUsingEncoding:NSUTF8StringEncoding] >= 1024) {
+        post_alert(name, "The additional disk path is too long.");
+        return BACKEND_ERR_INVALID_ARG;
+    }
+    NSString *extension = canonicalPath.pathExtension.lowercaseString;
+    if (![extension isEqualToString:@"img"] && ![extension isEqualToString:@"raw"]) {
+        post_alert(name, "macOS hosts can attach existing raw IMG or RAW disk images.");
+        return BACKEND_ERR_INVALID_ARG;
+    }
+    struct stat selectedStat;
+    if (stat(canonicalPath.fileSystemRepresentation, &selectedStat) != 0 ||
+        !S_ISREG(selectedStat.st_mode) || selectedStat.st_size <= 0 ||
+        access(canonicalPath.fileSystemRepresentation, R_OK | W_OK) != 0) {
+        post_alert(name, "The selected disk image must be a non-empty, readable, writable file.");
+        return BACKEND_ERR_INVALID_ARG;
+    }
+
+    for (int i = 0; i < g_vm_count; i++) {
+        NSString *vmDisk = [VmDir diskImageURLFor:@(g_vms[i].name)].path;
+        if (path_is_within_directory(canonicalPath, [VmDir directoryFor:@(g_vms[i].name)].path) ||
+            path_is_within_directory(canonicalPath, [VmDir diskDirectoryForVm:@(g_vms[i].name)].path) ||
+            same_file_at_paths(canonicalPath, vmDisk)) {
+            post_alert(name, "Choose a disk image outside App Sandbox's VM storage so the source remains untouched when a VM is deleted.");
+            return BACKEND_ERR_INVALID_ARG;
+        }
+        for (int d = 0; d < g_vms[i].additional_disk_count; d++) {
+            NSString *attachedPath = @(g_vms[i].additional_disk_paths[d]);
+            if (same_file_at_paths(canonicalPath, attachedPath)) {
+                post_alert(name, "This disk image is already attached to another VM.");
+                return BACKEND_ERR_INVALID_ARG;
+            }
+        }
+    }
+
+    strlcpy(vm->additional_disk_paths[vm->additional_disk_count++],
+            canonicalPath.fileSystemRepresentation,
+            sizeof(vm->additional_disk_paths[0]));
+    save_vm_list();
+    post_log("[%s] Attached existing disk image: %s", name,
+             canonicalPath.fileSystemRepresentation);
+    post_list_changed();
+    return BACKEND_OK;
+}
+
+int asb_mac_vm_remove_disk(const char *name, int disk_index) {
+    if (!name) return BACKEND_ERR_INVALID_ARG;
+    int idx = vm_index_of(name);
+    if (idx < 0) return BACKEND_ERR_NOT_FOUND;
+    AsbVmMac *vm = &g_vms[idx];
+    if (disk_index < 0 || disk_index >= vm->additional_disk_count) {
+        post_alert(name, "Select an attached disk to detach.");
+        return BACKEND_ERR_INVALID_ARG;
+    }
+    if (vm->running || vm->shutting_down || vm->vz_handle || g_qemu_refs[idx] ||
+        (!vm->disk_built && vm->install_progress >= 0)) {
+        post_alert(name, "A virtual disk can only be detached when the VM is stopped.");
+        return BACKEND_ERR_FAILED;
+    }
+
+    post_log("[%s] Detached existing disk image: %s", name,
+             vm->additional_disk_paths[disk_index]);
+    for (int d = disk_index; d + 1 < vm->additional_disk_count; d++)
+        strlcpy(vm->additional_disk_paths[d], vm->additional_disk_paths[d + 1],
+                sizeof(vm->additional_disk_paths[d]));
+    vm->additional_disk_count--;
+    vm->additional_disk_paths[vm->additional_disk_count][0] = '\0';
+    save_vm_list();
+    post_list_changed();
     return BACKEND_OK;
 }
 

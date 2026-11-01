@@ -16,6 +16,7 @@
 #import "EventLogWindow.h"
 
 #include "asb_types.h"
+#include <sys/stat.h>
 
 #pragma mark - Static state
 
@@ -56,6 +57,15 @@ static void postToJs(NSDictionary *message) {
 
 static NSDictionary *vmToJsDict(const AsbVmMac *vm) {
     BOOL isWindows = strcasecmp(vm->os_type, "Windows") == 0;
+    NSMutableArray<NSDictionary *> *additionalDisks = [NSMutableArray arrayWithCapacity:vm->additional_disk_count];
+    for (int i = 0; i < vm->additional_disk_count; i++) {
+        const char *path = vm->additional_disk_paths[i];
+        const char *baseName = strrchr(path, '/');
+        [additionalDisks addObject:@{
+            @"name": [NSString stringWithUTF8String:baseName ? baseName + 1 : path],
+            @"index": @(i)
+        }];
+    }
     return @{
         @"name":            [NSString stringWithUTF8String:vm->name],
         @"osType":          [NSString stringWithUTF8String:vm->os_type],
@@ -65,6 +75,7 @@ static NSDictionary *vmToJsDict(const AsbVmMac *vm) {
         @"agentOnline":     @(vm->agent_online ? YES : NO),
         @"ramMb":           @(vm->ram_mb),
         @"hddGb":           @(vm->hdd_gb),
+        @"additionalDisks": additionalDisks,
         @"cpuCores":        @(vm->cpu_cores),
         @"gpuMode":         @(vm->gpu_mode),
         @"gpuName":         isWindows ? @"Software (WARP)" : [HostInfo hostGpuName],
@@ -107,6 +118,11 @@ static NSDictionary *buildHostInfoDict(void) {
             vmRamMb += vm->ram_mb;
         }
         vmHddGb += vm->hdd_gb;
+        for (int d = 0; d < vm->additional_disk_count; d++) {
+            struct stat diskStat;
+            if (stat(vm->additional_disk_paths[d], &diskStat) == 0)
+                vmHddGb += (int)(diskStat.st_size / (1024LL * 1024LL * 1024LL));
+        }
     }
     return @{
         @"hostCores": @([HostInfo hostCores]),
@@ -313,6 +329,47 @@ static void handleStartVm(NSDictionary *msg) {
     asb_mac_vm_start([n UTF8String]);
 }
 
+static void handleAddDisk(NSDictionary *msg) {
+    NSString *n = vmNameAtIndex(msg[@"vmIndex"]);
+    id diskPath = msg[@"diskPath"];
+    if (!n || ![diskPath isKindOfClass:[NSString class]] || ![diskPath length]) {
+        sendAlert(@"Select an existing disk image to attach.");
+        return;
+    }
+    asb_mac_vm_add_disk(n.UTF8String, [diskPath UTF8String]);
+}
+
+static void handleRemoveDisk(NSDictionary *msg) {
+    NSString *n = vmNameAtIndex(msg[@"vmIndex"]);
+    id rawIndex = msg[@"diskIndex"];
+    if (!n || ![rawIndex isKindOfClass:[NSNumber class]]) {
+        sendAlert(@"Select an attached disk to detach.");
+        return;
+    }
+    asb_mac_vm_remove_disk(n.UTF8String, [rawIndex intValue]);
+    sendVmListChanged();
+}
+
+static void handleBrowseExistingDisk(void) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        NSOpenPanel *panel = [NSOpenPanel openPanel];
+        panel.canChooseFiles = YES;
+        panel.canChooseDirectories = NO;
+        panel.allowsMultipleSelection = NO;
+        NSMutableArray<UTType *> *types = [NSMutableArray array];
+        UTType *img = [UTType typeWithFilenameExtension:@"img"];
+        UTType *raw = [UTType typeWithFilenameExtension:@"raw"];
+        if (img) [types addObject:img];
+        if (raw) [types addObject:raw];
+        panel.allowedContentTypes = types;
+        panel.message = @"Select an existing raw disk image (.img or .raw)";
+        [panel beginWithCompletionHandler:^(NSModalResponse result) {
+            NSString *path = result == NSModalResponseOK && panel.URL ? panel.URL.path : @"";
+            postToJs(@{ @"type": @"existingDiskBrowseResult", @"path": path });
+        }];
+    });
+}
+
 static void handleStopVm(NSDictionary *msg) {
     NSString *n = vmNameAtIndex(msg[@"vmIndex"]);
     if (!n) return;
@@ -440,6 +497,12 @@ void ui_handle_message(NSString *json) {
         handleCreateVm(msg);
     } else if ([action isEqualToString:@"startVm"]) {
         handleStartVm(msg);
+    } else if ([action isEqualToString:@"addDisk"]) {
+        handleAddDisk(msg);
+    } else if ([action isEqualToString:@"removeDisk"]) {
+        handleRemoveDisk(msg);
+    } else if ([action isEqualToString:@"browseExistingDisk"]) {
+        handleBrowseExistingDisk();
     } else if ([action isEqualToString:@"stopVm"]) {
         handleStopVm(msg);
     } else if ([action isEqualToString:@"shutdownVm"]) {

@@ -14,6 +14,7 @@
 @class VzVm, VzDisplayWindow, VmAgentMac, VmSshProxyMac;
 
 #define ASB_MAX_VMS 32
+#define ASB_MAX_ADDITIONAL_DISKS 8
 
 typedef struct {
     char    name[256];
@@ -23,6 +24,8 @@ typedef struct {
     char    admin_pass[512];       /* UTF-8 storage for up to 127 Windows UTF-16 units. */
     int     ram_mb;
     int     hdd_gb;
+    int     additional_disk_count;
+    char    additional_disk_paths[ASB_MAX_ADDITIONAL_DISKS][1024];
     int     cpu_cores;
     int     gpu_mode;
     int     network_mode;
@@ -81,6 +84,8 @@ int  asb_mac_vm_create(const char *name, const char *os_type,
                         BOOL ssh_deploy_key,
                         BOOL test_mode);
 int  asb_mac_vm_start(const char *name);
+int  asb_mac_vm_add_disk(const char *name, const char *disk_path);
+int  asb_mac_vm_remove_disk(const char *name, int disk_index);
 int  asb_mac_vm_stop(const char *name, int force);
 int  asb_mac_vm_delete(const char *name);
 int  asb_mac_vm_edit(const char *name, const char *field, const char *value);

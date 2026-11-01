@@ -312,6 +312,17 @@ static void build_vm_json(JsonBuilder *jb, int i)
     jb_int(jb, L"sshState", (v->ssh_key_deployed && v->ssh_state == 2) ? 4 : v->ssh_state);
     jb_bool(jb, L"sshDeployKey", v->ssh_deploy_key);
     jb_bool(jb, L"sshKeyDeployed", v->ssh_key_deployed);
+    jb_array_begin(jb, L"additionalDisks");
+    for (int d = 0; d < v->additional_disk_count; d++) {
+        if (d > 0) jb_append(jb, L",");
+        const wchar_t *base_name = wcsrchr(v->additional_disk_paths[d], L'\\');
+        base_name = base_name ? base_name + 1 : v->additional_disk_paths[d];
+        jb_object_begin(jb);
+        jb_string(jb, L"name", base_name);
+        jb_int(jb, L"index", d);
+        jb_object_end(jb);
+    }
+    jb_array_end(jb);
 
     /* Snapshot tree */
     {
@@ -1092,6 +1103,27 @@ static void on_webview2_message(const wchar_t *json)
             asb_vm_start(asb_vm_get(idx), si, bi, bname);
             send_vm_list();
         }
+    } else if (wcscmp(action, L"addDisk") == 0) {
+        int idx;
+        wchar_t disk_path[MAX_PATH + 1] = {0};
+        if (json_get_int(json, L"vmIndex", &idx) &&
+            json_get_string(json, L"diskPath", disk_path, ARRAYSIZE(disk_path)) &&
+            idx >= 0 && idx < asb_vm_count()) {
+            asb_vm_add_disk(asb_vm_get(idx), disk_path);
+            send_vm_list();
+        } else {
+            ui_show_alert(L"Select an existing disk image to attach.");
+        }
+    } else if (wcscmp(action, L"removeDisk") == 0) {
+        int idx, disk_index;
+        if (json_get_int(json, L"vmIndex", &idx) &&
+            json_get_int(json, L"diskIndex", &disk_index) &&
+            idx >= 0 && idx < asb_vm_count()) {
+            asb_vm_remove_disk(asb_vm_get(idx), disk_index);
+            send_vm_list();
+        } else {
+            ui_show_alert(L"Select an attached disk to detach.");
+        }
     } else if (wcscmp(action, L"shutdownVm") == 0) {
         int idx;
         if (json_get_int(json, L"vmIndex", &idx)) {
@@ -1283,6 +1315,26 @@ static void on_webview2_message(const wchar_t *json)
             jb_init(&jb, json_buf, 2048);
             jb_object_begin(&jb);
             jb_string(&jb, L"type", L"browseResult");
+            jb_string(&jb, L"path", file);
+            jb_object_end(&jb);
+            webview2_post(json_buf);
+        }
+    } else if (wcscmp(action, L"browseExistingDisk") == 0) {
+        OPENFILENAMEW ofn;
+        wchar_t file[MAX_PATH] = {0};
+        ZeroMemory(&ofn, sizeof(ofn));
+        ofn.lStructSize = sizeof(ofn);
+        ofn.hwndOwner = g_hwnd_main;
+        ofn.lpstrFilter = L"VHDX Disk Images (*.vhdx)\0*.vhdx\0All Files\0*.*\0";
+        ofn.lpstrFile = file;
+        ofn.nMaxFile = MAX_PATH;
+        ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
+        if (GetOpenFileNameW(&ofn)) {
+            wchar_t json_buf[2048];
+            JsonBuilder jb;
+            jb_init(&jb, json_buf, ARRAYSIZE(json_buf));
+            jb_object_begin(&jb);
+            jb_string(&jb, L"type", L"existingDiskBrowseResult");
             jb_string(&jb, L"path", file);
             jb_object_end(&jb);
             webview2_post(json_buf);

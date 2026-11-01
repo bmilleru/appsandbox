@@ -22,6 +22,7 @@
 
 #define ASB_MAX_VMS        32
 #define ASB_MAX_TEMPLATES  32
+#define ASB_MAX_ADDITIONAL_DISKS 8
 
 /* ---- Opaque handles ---- */
 
@@ -161,6 +162,8 @@ ASB_API HRESULT asb_vm_stop(AsbVm vm);
 
 /* Stop VM (if running) and delete all files, snapshots, and directories. */
 ASB_API HRESULT asb_vm_delete(AsbVm vm);
+ASB_API HRESULT asb_vm_add_disk(AsbVm vm, const wchar_t *disk_path);
+ASB_API HRESULT asb_vm_remove_disk(AsbVm vm, int disk_index);
 
 /* ---- VM queries ---- */
 

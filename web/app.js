@@ -7,6 +7,7 @@ let selectedVm = -1;
 let selectedSnap = new Map();
 let editVmState = null;
 let snapshotModal = null;
+let addDiskVmName = null;
 let pendingConfirm = null; /* {resolve} */
 let minSizeReported = false;
 let lastHostInfo = null;
@@ -142,6 +143,7 @@ window.onHostMessage = function(msg) {
         case 'hostInfo':      updateHostInfo(msg); break;
         case 'browseResult':  onBrowseResult(msg.path); break;
         case 'diskDirectoryBrowseResult': onDiskDirectoryBrowseResult(msg.path); break;
+        case 'existingDiskBrowseResult': onExistingDiskBrowseResult(msg.path); break;
         case 'diskSpace':     onDiskSpace(msg); break;
         case 'confirmResult': if (pendingConfirm) pendingConfirm.resolve(msg.confirmed); break;
         case 'adapters':      populateAdapters(msg.adapters, msg.defaultIndex); break;
@@ -889,6 +891,15 @@ document.addEventListener('keydown', function(e) {
         else trapModalFocus(e, confirmOverlay);
         return;
     }
+    var addDiskOverlay = document.getElementById('add-disk-overlay');
+    if (addDiskOverlay.classList.contains('active')) {
+        if (e.key === 'Escape') { e.preventDefault(); closeAddDiskModal(); }
+        else if (e.key === 'Enter' && e.target.id === 'add-disk-path') {
+            e.preventDefault();
+            submitAddDisk();
+        } else trapModalFocus(e, addDiskOverlay);
+        return;
+    }
     var diskOverlay = document.getElementById('disk-location-overlay');
     if (diskOverlay.classList.contains('active')) {
         if (e.key === 'Escape') { e.preventDefault(); closeDiskLocationModal(false); }
@@ -1005,6 +1016,15 @@ function buildRowCells(vm, i, statusTd) {
                 : 'In-VM agent is not connected'));
 
     var bld = vm.buildingVhdx;
+    var additionalDisks = (vm.additionalDisks || []).map(function(disk) {
+        return typeof disk === 'string' ? disk : disk.name;
+    });
+    var diskLabel = vm.hddGb + ' GB';
+    var diskTitle = 'System virtual disk: ' + vm.hddGb + ' GB';
+    if (additionalDisks.length) {
+        diskLabel += ' + ' + additionalDisks.length + ' attached';
+        diskTitle += '; attached disks: ' + additionalDisks.join(', ');
+    }
 
     var sshActive = vm.sshEnabled && (vm.sshState === 2 || vm.sshState === 4) && vm.running && !bld;
     var sshCell = makeIconCell('ssh', '>_', sshActive, (function(idx) { return function() { sendCmd('sshConnect', {vmIndex: idx}); }; })(i), !vm.sshEnabled ? 'hidden' : '');
@@ -1024,7 +1044,7 @@ function buildRowCells(vm, i, statusTd) {
         agentTd,
         makeCell(vm.cpuCores, 'Number of virtual CPU cores assigned to this VM'),
         makeCell(vm.ramMb + ' MB', 'Memory allocated to this VM, in megabytes'),
-        makeCell(vm.hddGb + ' GB', 'Virtual disk size, in gigabytes'),
+        makeCell(diskLabel, diskTitle),
         makeCell(vm.gpuName || (vm.gpuMode === 1 ? 'Default GPU' : 'None'),
             hostBridge.isMac && vm.osType === 'Windows'
                 ? 'Windows software rendering (WARP) on the CPU'
@@ -1040,8 +1060,10 @@ function buildRowCells(vm, i, statusTd) {
         sshCell,
         makeIconCell('shutdown', '\u23FB', vm.running && !bld, function() { sendCmd('shutdownVm', {vmIndex: i}); }, '', 'Request a graceful shutdown from the guest OS'),
         makeIconCell('stop', '\u2715\uFE0F', vm.running && !bld, function() { onStopVm(i); }, '', 'Force power off the VM immediately (may lose unsaved guest data)'),
-        makeIconCell('delete', '\uD83D\uDDD1\uFE0F', !bld, function() { onDeleteVm(i); }, vm.running ? 'running' : '', 'Delete this VM and its virtual disks'),
+        makeIconCell('delete', '\uD83D\uDDD1\uFE0F', !bld, function() { onDeleteVm(i); }, vm.running ? 'running' : '', 'Delete this VM and its managed virtual disks; attached external disks are kept'),
         makeIconCell('edit', '\u270F\uFE0F', !vm.running && !bld, function() { openEditVmModal(i); }, '', 'Edit VM configuration — VM must be stopped'),
+        makeIconCell('add-disk', '+', !vm.running && !vm.shuttingDown && !bld && !vm.isTemplate && (vm.additionalDisks || []).length < 8,
+            function() { openAddDiskModal(i); }, '', 'Attach an existing virtual disk — VM must be stopped'),
     );
     return cells;
 }
@@ -1057,7 +1079,7 @@ function renderVmTable() {
         tbody.innerHTML = '';
         var tr = document.createElement('tr');
         var td = document.createElement('td');
-        td.colSpan = hostBridge.isMac ? 16 : 17;
+        td.colSpan = hostBridge.isMac ? 17 : 18;
         td.className = 'empty-state';
         var btn = document.createElement('button');
         btn.className = 'primary empty-state-btn';
@@ -1108,6 +1130,7 @@ function renderVmTable() {
             vm.installComplete, vm.isTemplate,
             vm.sshEnabled, vm.sshState, vm.sshPort,
             vm.osType, vm.ramMb, vm.hddGb, vm.cpuCores,
+            JSON.stringify(vm.additionalDisks || []),
             vm.gpuMode, vm.gpuId, vm.gpuName, vm.networkMode,
             selectedSnap.get(vm.name) || 'current',
             /* Snapshot tree: take/delete/rename/branch must trigger a row rebuild
@@ -1169,6 +1192,43 @@ function makeIconCell(cls, icon, active, handler, extraClass, title) {
     else btn.disabled = true;
     td.appendChild(btn);
     return td;
+}
+
+function openAddDiskModal(idx) {
+    var vm = vms[idx];
+    if (!vm || vm.running || vm.shuttingDown || vm.buildingVhdx || vm.isTemplate ||
+        (vm.additionalDisks || []).length >= 8) return;
+    addDiskVmName = vm.name;
+    document.getElementById('add-disk-title').textContent = 'Add Virtual Disk — ' + vm.name;
+    document.getElementById('add-disk-path').value = '';
+    document.getElementById('add-disk-overlay').classList.add('active');
+    document.getElementById('add-disk-path').focus();
+}
+
+function closeAddDiskModal() {
+    document.getElementById('add-disk-overlay').classList.remove('active');
+    addDiskVmName = null;
+}
+
+function submitAddDisk() {
+    var diskPath = document.getElementById('add-disk-path').value.trim();
+    if (!addDiskVmName || !diskPath) {
+        showModal('Select a Disk Image', 'Choose an existing disk image to attach.', 'OK');
+        return;
+    }
+    var idx = vmIndexByName(addDiskVmName);
+    if (idx < 0) { closeAddDiskModal(); return; }
+    sendCmd('addDisk', { vmIndex: idx, diskPath: diskPath });
+    closeAddDiskModal();
+}
+
+function onExistingDiskBrowseResult(path) {
+    if (path && document.getElementById('edit-vm-overlay').classList.contains('active')) {
+        document.getElementById('edit-disk-path').value = path;
+        document.getElementById('edit-disk-warn').textContent = '';
+    } else if (path && document.getElementById('add-disk-overlay').classList.contains('active')) {
+        document.getElementById('add-disk-path').value = path;
+    }
 }
 
 /* ---- VM Selection ---- */
@@ -1251,14 +1311,74 @@ function updateEditVmModal() {
     if (!editVmState) return;
     var vm = vms[vmIndexByName(editVmState.name)];
     if (!vm) { closeEditVmModal(); return; }
-    var disabled = vm.running || vm.buildingVhdx;
+    var disabled = vm.running || vm.shuttingDown || vm.buildingVhdx;
     document.querySelectorAll('#edit-vm-overlay input, #edit-vm-overlay select').forEach(function(el) {
         el.disabled = !!disabled;
     });
+    var disks = vm.additionalDisks || [];
+    var diskList = document.getElementById('edit-disks-list');
+    diskList.replaceChildren();
+    if (!disks.length) {
+        var empty = document.createElement('li');
+        empty.textContent = 'No additional disks attached.';
+        empty.className = 'host-info';
+        diskList.appendChild(empty);
+    } else {
+        disks.forEach(function(disk, arrayIndex) {
+            var item = document.createElement('li');
+            var name = document.createElement('span');
+            name.textContent = typeof disk === 'string' ? disk : disk.name;
+            name.title = typeof disk === 'string' ? disk : disk.name;
+            var detach = document.createElement('button');
+            detach.type = 'button';
+            detach.textContent = 'Detach';
+            detach.disabled = !!disabled;
+            detach.onclick = function() {
+                detachDiskFromEdit(typeof disk === 'string' ? arrayIndex : disk.index, name.textContent);
+            };
+            item.appendChild(name);
+            item.appendChild(detach);
+            diskList.appendChild(item);
+        });
+    }
+    document.getElementById('btn-edit-browse-disk').disabled = !!disabled;
+    document.getElementById('btn-edit-add-disk').disabled = !!disabled || disks.length >= 8;
+    document.getElementById('edit-disk-warn').textContent =
+        disks.length >= 8 ? 'This VM has reached the limit of 8 additional disks.' : '';
     var values = editVmValues();
     var error = disabled ? 'Stop the VM before editing its configuration.' : editVmValidationError(values);
     document.getElementById('edit-vm-warn').textContent = error;
     document.getElementById('btn-save-edit-vm').disabled = !!error;
+}
+
+function addDiskFromEdit() {
+    if (!editVmState) return;
+    var idx = vmIndexByName(editVmState.name);
+    var vm = vms[idx];
+    var diskPath = document.getElementById('edit-disk-path').value.trim();
+    if (!vm || idx < 0 || vm.running || vm.shuttingDown || vm.buildingVhdx) return;
+    if (!diskPath) {
+        document.getElementById('edit-disk-warn').textContent = 'Choose an existing disk image to attach.';
+        return;
+    }
+    if ((vm.additionalDisks || []).length >= 8) {
+        document.getElementById('edit-disk-warn').textContent = 'This VM has reached the limit of 8 additional disks.';
+        return;
+    }
+    sendCmd('addDisk', { vmIndex: idx, diskPath: diskPath });
+}
+
+async function detachDiskFromEdit(diskIndex, diskName) {
+    if (!editVmState || !Number.isInteger(diskIndex)) return;
+    var idx = vmIndexByName(editVmState.name);
+    if (idx < 0) return;
+    var confirmed = await showModal(
+        'Detach Disk',
+        'Detach "' + diskName + '" from this VM? The disk image file will not be deleted.',
+        'Detach',
+        { confirmClass: 'danger' }
+    );
+    if (confirmed && editVmState) sendCmd('removeDisk', { vmIndex: idx, diskIndex: diskIndex });
 }
 
 function saveEditVm() {

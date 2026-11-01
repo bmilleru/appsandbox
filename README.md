@@ -15,6 +15,7 @@ Windows features:
 - GPU Hardware Video Decoder/Encoder support
 - SSH via Hyper-V socket proxy (no network required)
 - Snapshots
+- Attach and detach existing VHDX disk images from stopped VMs (images are used in place and are not deleted when detached)
 - Fixed 1080P60 display
 - Host to client hot-key support
 - Provision and boot with / without internet
@@ -28,6 +29,7 @@ Mac features:
 - 2 Channel Audio
 - macOS: GPU Acceleration via Paravirtualization with support for Metal, Windows: No GPU Acceleration
 - SSH via virtio-vsock (no network required)
+- Attach and detach existing raw IMG/RAW disk images from stopped VMs (images are used in place and are not deleted when detached)
 - Fixed 1080P60 display on Windows 11 guests, Dynamic display sizing on macOS guests
 - Provision and boot with / without internet
 - Headless mode: the same scriptable local HTTP/JSON API + Python SDK (`asb.py`) as on Windows, for driving macOS and Windows 11 VMs programmatically
