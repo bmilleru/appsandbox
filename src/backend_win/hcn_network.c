@@ -3,7 +3,9 @@
 #include "ui.h"
 #include <stdio.h>
 #include <objbase.h>
+#include <ws2ipdef.h>
 #include <iphlpapi.h>
+#include <netioapi.h>
 
 #pragma comment(lib, "iphlpapi.lib")
 
@@ -95,9 +97,46 @@ static const GUID APPSANDBOX_EXTERNAL_GUID = {
     { 0xDE, 0xF0, 0x11, 0x22, 0x33, 0x44, 0x55, 0x88 }
 };
 
-/* Find the adapter that carries the default route (0.0.0.0/0). */
-/* Find a physical adapter that is UP, has a default gateway, and isn't virtual.
-   Prefers Ethernet (IF_TYPE_ETHERNET_CSMACD) over Wi-Fi (IF_TYPE_IEEE80211). */
+static BOOL get_active_physical_adapter(wchar_t *out, size_t out_len)
+{
+    PMIB_IF_TABLE2 table = NULL;
+    PMIB_IF_ROW2 best_eth = NULL;
+    PMIB_IF_ROW2 best_wifi = NULL;
+    PMIB_IF_ROW2 row;
+    ULONG i;
+    NETIO_STATUS status = GetIfTable2(&table);
+    if (status != NO_ERROR) {
+        ui_log(L"GetIfTable2 failed while selecting an External adapter (0x%08X).",
+               status);
+        return FALSE;
+    }
+
+    for (i = 0; i < table->NumEntries; i++) {
+        row = &table->Table[i];
+        if (row->OperStatus != IfOperStatusUp ||
+            !row->InterfaceAndOperStatusFlags.HardwareInterface ||
+            wcsstr(row->Alias, L"vEthernet") != NULL ||
+            wcsstr(row->Alias, L"vSwitch") != NULL)
+            continue;
+        if (row->Type == IF_TYPE_ETHERNET_CSMACD && !best_eth)
+            best_eth = row;
+        else if (row->Type == IF_TYPE_IEEE80211 && !best_wifi)
+            best_wifi = row;
+    }
+
+    row = best_eth ? best_eth : best_wifi;
+    if (row) {
+        wcscpy_s(out, out_len, row->Alias);
+        ui_log(L"Selected active adapter from interface table: %s (type %lu, index %lu).",
+               out, row->Type, row->InterfaceIndex);
+    }
+    FreeMibTable(table);
+    return row != NULL;
+}
+
+/* Prefer the active physical adapter that carries the default route. If Windows
+   routes through a VPN or another virtual interface, fall back to an active
+   physical Ethernet/Wi-Fi adapter so the caller can still bridge to it. */
 static BOOL get_default_adapter_name(wchar_t *out, size_t out_len)
 {
     ULONG buf_len;
@@ -105,6 +144,8 @@ static BOOL get_default_adapter_name(wchar_t *out, size_t out_len)
     PIP_ADAPTER_ADDRESSES cur;
     PIP_ADAPTER_ADDRESSES best_eth = NULL;
     PIP_ADAPTER_ADDRESSES best_wifi = NULL;
+    PIP_ADAPTER_ADDRESSES fallback_eth = NULL;
+    PIP_ADAPTER_ADDRESSES fallback_wifi = NULL;
     PIP_ADAPTER_ADDRESSES pick;
     DWORD ret;
 
@@ -112,20 +153,20 @@ static BOOL get_default_adapter_name(wchar_t *out, size_t out_len)
     addrs = (PIP_ADAPTER_ADDRESSES)HeapAlloc(GetProcessHeap(), 0, buf_len);
     if (!addrs) return FALSE;
 
-    ret = GetAdaptersAddresses(AF_INET,
+    ret = GetAdaptersAddresses(AF_UNSPEC,
         GAA_FLAG_INCLUDE_GATEWAYS | GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST,
         NULL, addrs, &buf_len);
     if (ret == ERROR_BUFFER_OVERFLOW) {
         HeapFree(GetProcessHeap(), 0, addrs);
         addrs = (PIP_ADAPTER_ADDRESSES)HeapAlloc(GetProcessHeap(), 0, buf_len);
         if (!addrs) return FALSE;
-        ret = GetAdaptersAddresses(AF_INET,
+        ret = GetAdaptersAddresses(AF_UNSPEC,
             GAA_FLAG_INCLUDE_GATEWAYS | GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST,
             NULL, addrs, &buf_len);
     }
     if (ret != ERROR_SUCCESS) {
         HeapFree(GetProcessHeap(), 0, addrs);
-        return FALSE;
+        return get_active_physical_adapter(out, out_len);
     }
 
     for (cur = addrs; cur != NULL; cur = cur->Next) {
@@ -143,30 +184,30 @@ static BOOL get_default_adapter_name(wchar_t *out, size_t out_len)
         if (cur->IfType == IF_TYPE_TUNNEL)
             continue;
 
-        /* Must have a gateway (i.e. connected to a network with internet) */
-        if (cur->FirstGatewayAddress != NULL)
-            has_gateway = TRUE;
-        if (!has_gateway)
-            continue;
-
-        /* Prefer Ethernet over Wi-Fi */
-        if (cur->IfType == IF_TYPE_ETHERNET_CSMACD && !best_eth)
-            best_eth = cur;
-        else if (cur->IfType == IF_TYPE_IEEE80211 && !best_wifi)
-            best_wifi = cur;
+        has_gateway = cur->FirstGatewayAddress != NULL;
+        if (cur->IfType == IF_TYPE_ETHERNET_CSMACD) {
+            if (has_gateway && !best_eth) best_eth = cur;
+            else if (!fallback_eth) fallback_eth = cur;
+        } else if (cur->IfType == IF_TYPE_IEEE80211) {
+            if (has_gateway && !best_wifi) best_wifi = cur;
+            else if (!fallback_wifi) fallback_wifi = cur;
+        }
     }
 
-    pick = best_eth ? best_eth : best_wifi;
+    pick = best_eth ? best_eth : best_wifi ? best_wifi :
+        fallback_eth ? fallback_eth : fallback_wifi;
     if (pick) {
         wcscpy_s(out, out_len, pick->FriendlyName);
-        ui_log(L"Selected adapter: %s (type %lu, index %lu)",
-               out, pick->IfType, pick->IfIndex);
+        ui_log(L"Selected adapter: %s (type %lu, index %lu%s)",
+               out, pick->IfType, pick->IfIndex,
+               (pick == fallback_eth || pick == fallback_wifi)
+                   ? L", no default gateway; using active physical adapter" : L"");
         HeapFree(GetProcessHeap(), 0, addrs);
         return TRUE;
     }
 
     HeapFree(GetProcessHeap(), 0, addrs);
-    return FALSE;
+    return get_active_physical_adapter(out, out_len);
 }
 
 /* Check if a network already exists by GUID. Returns TRUE if it does. */
@@ -425,7 +466,7 @@ HRESULT hcn_create_external_network(GUID *network_id, const wchar_t *adapter_nam
         ui_log(L"Using adapter: %s", adapter);
     } else {
         if (!get_default_adapter_name(adapter, 256)) {
-            ui_log(L"Error: No connected network adapter found for External network.");
+            ui_log(L"Error: No active physical Ethernet or Wi-Fi adapter found for External network. Select an adapter explicitly if one is available.");
             ReleaseSRWLockExclusive(&g_network_lock);
             return E_FAIL;
         }
@@ -586,38 +627,31 @@ HRESULT hcn_delete_endpoint(const GUID *endpoint_id)
 
 int hcn_enum_adapters(HcnAdapterCallback cb, void *ctx)
 {
-    ULONG buf_len = 15000;
-    PIP_ADAPTER_ADDRESSES addrs, cur;
-    DWORD ret;
+    PMIB_IF_TABLE2 table = NULL;
+    NETIO_STATUS status;
+    ULONG i;
     int count = 0;
 
-    addrs = (PIP_ADAPTER_ADDRESSES)HeapAlloc(GetProcessHeap(), 0, buf_len);
-    if (!addrs) return 0;
-
-    ret = GetAdaptersAddresses(AF_INET,
-        GAA_FLAG_INCLUDE_GATEWAYS | GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST,
-        NULL, addrs, &buf_len);
-    if (ret == ERROR_BUFFER_OVERFLOW) {
-        HeapFree(GetProcessHeap(), 0, addrs);
-        addrs = (PIP_ADAPTER_ADDRESSES)HeapAlloc(GetProcessHeap(), 0, buf_len);
-        if (!addrs) return 0;
-        ret = GetAdaptersAddresses(AF_INET,
-            GAA_FLAG_INCLUDE_GATEWAYS | GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST,
-            NULL, addrs, &buf_len);
+    status = GetIfTable2(&table);
+    if (status != NO_ERROR) {
+        ui_log(L"GetIfTable2 failed while enumerating External adapters (0x%08X).",
+               status);
+        return 0;
     }
 
-    if (ret == ERROR_SUCCESS) {
-        for (cur = addrs; cur != NULL; cur = cur->Next) {
-            if (cur->OperStatus != IfOperStatusUp) continue;
-            if (cur->IfType == IF_TYPE_SOFTWARE_LOOPBACK) continue;
-            if (cur->IfType == IF_TYPE_TUNNEL) continue;
-            if (wcsstr(cur->FriendlyName, L"vEthernet") != NULL) continue;
+    for (i = 0; i < table->NumEntries; i++) {
+        PMIB_IF_ROW2 row = &table->Table[i];
+        if (row->OperStatus != IfOperStatusUp ||
+            !row->InterfaceAndOperStatusFlags.HardwareInterface) continue;
+        if (row->Type != IF_TYPE_ETHERNET_CSMACD &&
+            row->Type != IF_TYPE_IEEE80211) continue;
+        if (wcsstr(row->Alias, L"vEthernet") != NULL) continue;
+        if (wcsstr(row->Alias, L"vSwitch") != NULL) continue;
 
-            cb(cur->FriendlyName, (int)cur->IfType, ctx);
-            count++;
-        }
+        cb(row->Alias, (int)row->Type, ctx);
+        count++;
     }
 
-    HeapFree(GetProcessHeap(), 0, addrs);
+    FreeMibTable(table);
     return count;
 }

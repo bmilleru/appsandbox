@@ -222,12 +222,14 @@
 
                 <label for="edit-net-mode" class="win-only">Network:</label>
                 <div class="form-row win-only">
-                    <select id="edit-net-mode">
+                    <select id="edit-net-mode" onchange="onEditNetModeChange()">
                         <option value="0">None</option>
                         <option value="1">NAT</option>
                         <option value="2">External</option>
                         <option value="3">Internal</option>
                     </select>
+                    <label id="edit-net-adapter-label" for="edit-net-adapter" style="text-align:left">Adapter:</label>
+                    <select id="edit-net-adapter"></select>
                 </div>
             </div>
             <section class="edit-disks-section" aria-labelledby="edit-disks-title">

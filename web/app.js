@@ -320,21 +320,23 @@ function onDiskSpace(msg) {
 
 var currentAdapters = [];
 
-function populateAdapters(adapters, defaultIdx) {
-    var sel = document.getElementById('net-adapter');
+function fillAdapterSelect(sel, adapters, defaultIdx) {
     sel.innerHTML = '<option value="">(Auto)</option>';
-    currentAdapters = adapters || [];
-    if (adapters) {
-        adapters.forEach(function(a) {
-            var opt = document.createElement('option');
-            opt.value = a;
-            opt.textContent = a;
-            sel.appendChild(opt);
-        });
-    }
+    (adapters || []).forEach(function(a) {
+        var opt = document.createElement('option');
+        opt.value = a;
+        opt.textContent = a;
+        sel.appendChild(opt);
+    });
     if (typeof defaultIdx === 'number' && defaultIdx >= 0 && defaultIdx < sel.options.length) {
         sel.selectedIndex = defaultIdx;
     }
+}
+
+function populateAdapters(adapters, defaultIdx) {
+    fillAdapterSelect(document.getElementById('net-adapter'), adapters, defaultIdx);
+    fillAdapterSelect(document.getElementById('edit-net-adapter'), adapters, defaultIdx);
+    currentAdapters = adapters || [];
 }
 
 /* ---- Templates ---- */
@@ -627,6 +629,12 @@ function onNetModeChange() {
     document.getElementById('net-adapter-label').style.display = show;
 }
 onNetModeChange();
+
+function onEditNetModeChange() {
+    var show = Number(document.getElementById('edit-net-mode').value) === 2 ? '' : 'none';
+    document.getElementById('edit-net-adapter').style.display = show;
+    document.getElementById('edit-net-adapter-label').style.display = show;
+}
 
 /* ---- Create VM ---- */
 
@@ -1263,6 +1271,19 @@ function openEditVmModal(idx) {
     document.getElementById('edit-cpu-cores').value = vm.cpuCores;
     setGpuSelection('edit-gpu-mode', vm);
     document.getElementById('edit-net-mode').value = String(vm.networkMode);
+    var adapterSelect = document.getElementById('edit-net-adapter');
+    if (vm.netAdapter) {
+        if (!Array.prototype.some.call(adapterSelect.options, function(opt) { return opt.value === vm.netAdapter; })) {
+            var opt = document.createElement('option');
+            opt.value = vm.netAdapter;
+            opt.textContent = vm.netAdapter + ' (not detected)';
+            adapterSelect.appendChild(opt);
+        }
+        adapterSelect.value = vm.netAdapter;
+    } else if (vm.networkMode === 2) {
+        adapterSelect.value = '';
+    }
+    onEditNetModeChange();
     updateEditVmModal();
     document.getElementById('edit-vm-overlay').classList.add('active');
     document.getElementById('edit-ram-size').focus();
@@ -1293,6 +1314,8 @@ function editVmValues() {
     if (!hostBridge.isMac) {
         Object.assign(values, selectedGpu('edit-gpu-mode'));
         values.networkMode = Number(document.getElementById('edit-net-mode').value);
+        if (values.networkMode === 2)
+            values.netAdapter = document.getElementById('edit-net-adapter').value;
     }
     return values;
 }
@@ -1391,14 +1414,27 @@ function saveEditVm() {
     var gpuChanged = !hostBridge.isMac &&
         gpuSelectionValue(values) !== gpuSelectionValue(editVmState.initial) &&
         gpuSelectionValue(values) !== gpuSelectionValue(vms[idx]);
+    var networkModeChanged = values.networkMode !== editVmState.initial.networkMode &&
+        values.networkMode !== vms[idx].networkMode;
+    var networkAdapterChanged = values.networkMode === 2 &&
+        values.netAdapter !== (editVmState.initial.netAdapter || '') &&
+        values.netAdapter !== (vms[idx].netAdapter || '');
+    var networkChanged = !hostBridge.isMac &&
+        (networkModeChanged || networkAdapterChanged);
     var fields = Object.keys(values).filter(function(field) {
         return field !== 'gpuMode' && field !== 'gpuId' &&
+            field !== 'networkMode' && field !== 'netAdapter' &&
             values[field] !== editVmState.initial[field] && values[field] !== vms[idx][field];
     });
     closeEditVmModal();
     fields.forEach(function(field) {
         sendCmd('editVm', { vmIndex: idx, field: field, value: String(values[field]) });
     });
+    if (networkChanged) {
+        var networkChange = { vmIndex: idx, field: 'networkMode', value: String(values.networkMode) };
+        if (values.networkMode === 2) networkChange.netAdapter = values.netAdapter;
+        sendCmd('editVm', networkChange);
+    }
     if (gpuChanged)
         sendCmd('editVm', { vmIndex: idx, field: 'gpuMode', value: String(values.gpuMode), gpuId: values.gpuId });
 }

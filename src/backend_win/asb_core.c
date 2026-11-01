@@ -4223,9 +4223,23 @@ ASB_API HRESULT asb_vm_set_network(AsbVm vm, int mode)
 {
     int idx = vm_index_of(vm);
     if (idx < 0) return E_INVALIDARG;
+    return asb_vm_set_network_config(vm, mode, g_vms[idx].net_adapter);
+}
+
+ASB_API HRESULT asb_vm_set_network_config(AsbVm vm, int mode, const wchar_t *adapter)
+{
+    int idx = vm_index_of(vm);
+    const wchar_t *net_adapter = adapter;
+    if (idx < 0) return E_INVALIDARG;
     if (g_vms[idx].running) return E_ACCESSDENIED;
     if (mode < 0 || mode > 3) return E_INVALIDARG;
+    if (net_adapter && wcscmp(net_adapter, L"(Auto)") == 0)
+        net_adapter = L"";
+    if (net_adapter && wcslen(net_adapter) >= ARRAYSIZE(g_vms[idx].net_adapter))
+        return E_INVALIDARG;
     g_vms[idx].network_mode = mode;
+    wcscpy_s(g_vms[idx].net_adapter, ARRAYSIZE(g_vms[idx].net_adapter),
+        net_adapter ? net_adapter : L"");
     save_vm_list();
     if (g_state_cb) g_state_cb(vm, g_vms[idx].running, g_state_ud);
     return S_OK;

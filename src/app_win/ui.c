@@ -1253,7 +1253,17 @@ static void on_webview2_message(const wchar_t *json)
                         error = asb_validate_gpu_selection(mode, gpu_id);
                     if (!error) hr = asb_vm_set_gpu_selection(vm, mode, gpu_id);
                 }
-                else if (wcscmp(field, L"networkMode") == 0) hr = asb_vm_set_network(vm, _wtoi(value));
+                else if (wcscmp(field, L"networkMode") == 0) {
+                    wchar_t adapter[256];
+                    if (json_has_key(json, L"netAdapter")) {
+                        if (!json_get_string(json, L"netAdapter", adapter, ARRAYSIZE(adapter)))
+                            error = L"Network adapter name is invalid or too long.";
+                        else
+                            hr = asb_vm_set_network_config(vm, _wtoi(value), adapter);
+                    } else {
+                        hr = asb_vm_set_network(vm, _wtoi(value));
+                    }
+                }
                 if (FAILED(hr)) ui_show_alert(error ? error : L"VM configuration could not be updated.");
                 else asb_save();
             }
