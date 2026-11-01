@@ -27,6 +27,7 @@
 @property (nonatomic, strong) NSURL *vmDir;
 @property (nonatomic, assign) int ramMb;
 @property (nonatomic, assign) int cpuCores;
+@property (nonatomic, copy) NSArray<NSString *> *additionalDiskPaths;
 @property (nonatomic, copy) NSString *macAddress;
 @property (nonatomic, assign) BOOL testMode;
 @property (nonatomic, assign, readwrite) QemuVmState state;
@@ -41,6 +42,7 @@
                        vmDir:(NSURL *)vmDir
                        ramMb:(int)ramMb
                     cpuCores:(int)cpuCores
+      additionalDiskPaths:(NSArray<NSString *> *)additionalDiskPaths
                   macAddress:(NSString *)macAddress
                     testMode:(BOOL)testMode {
     if ((self = [super init])) {
@@ -48,6 +50,7 @@
         _vmDir = vmDir;
         _ramMb = ramMb > 0 ? ramMb : 4096;
         _cpuCores = cpuCores > 0 ? cpuCores : 4;
+        _additionalDiskPaths = [additionalDiskPaths copy] ?: @[];
         _macAddress = [macAddress copy];
         _testMode = testMode;
         _state = QemuVmStateStopped;
@@ -212,7 +215,7 @@
      * because we are the root daemon or via the elevation prompt below; there is NO fall back to
      * user-mode NAT (see [[windows-on-mac-networking]]). The HMP monitor is loopback TCP so an
      * unprivileged app can still control a root-owned QEMU. */
-    NSArray<NSString *> *args = @[
+    NSMutableArray<NSString *> *args = [NSMutableArray arrayWithArray:@[
         @"-name", self.name,
         @"-accel", @"hvf", @"-cpu", @"host",
         @"-M", @"virt,gic-version=3,highmem=on",
@@ -244,7 +247,20 @@
         @"-display", @"none",
         @"-rtc", @"base=localtime",
         @"-monitor", [NSString stringWithFormat:@"tcp:127.0.0.1:%d,server,nowait", self.monitorPort],
-    ];
+    ]];
+    for (NSUInteger i = 0; i < self.additionalDiskPaths.count; i++) {
+        NSString *diskPath = self.additionalDiskPaths[i];
+        if (![[NSFileManager defaultManager] fileExistsAtPath:diskPath]) {
+            done([self err:[NSString stringWithFormat:@"Additional disk image not found: %@", diskPath]]);
+            return;
+        }
+        NSString *driveId = [NSString stringWithFormat:@"asbdata%d", i + 1];
+        [args addObjectsFromArray:@[
+            @"-device", [NSString stringWithFormat:@"nvme,drive=%@,serial=asb-data-%lu", driveId, (unsigned long)i + 1],
+            @"-drive", [NSString stringWithFormat:@"if=none,id=%@,format=raw,file=%@",
+                        driveId, [diskPath stringByReplacingOccurrencesOfString:@"," withString:@",,"]],
+        ]];
+    }
 
     [self setStateOnMain:QemuVmStateStarting];
 

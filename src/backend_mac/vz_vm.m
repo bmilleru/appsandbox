@@ -135,6 +135,7 @@ static VZMacGraphicsDeviceConfiguration *BuildGraphics(void) {
                 ramMb:(int)ramMb
              cpuCores:(int)cpuCores
            macAddress:(VZMACAddress *)macAddress
+  additionalDiskPaths:(NSArray<NSString *> *)additionalDiskPaths
                 error:(NSError **)error {
     NSData *hwData = [NSData dataWithContentsOfURL:[VmDir hardwareModelURLFor:name]];
     NSData *midData = [NSData dataWithContentsOfURL:[VmDir machineIdentifierURLFor:name]];
@@ -176,7 +177,19 @@ static VZMacGraphicsDeviceConfiguration *BuildGraphics(void) {
     config.memorySize = (uint64_t)ramMb * 1024ULL * 1024ULL;
     config.platform = platform;
     config.bootLoader = [[VZMacOSBootLoader alloc] init];
-    config.storageDevices = @[[[VZVirtioBlockDeviceConfiguration alloc] initWithAttachment:att]];
+    NSMutableArray *storageDevices = [NSMutableArray arrayWithObject:
+        [[VZVirtioBlockDeviceConfiguration alloc] initWithAttachment:att]];
+    for (NSString *diskPath in additionalDiskPaths) {
+        NSURL *diskURL = [NSURL fileURLWithPath:diskPath];
+        VZDiskImageStorageDeviceAttachment *additionalAttachment =
+            [[VZDiskImageStorageDeviceAttachment alloc] initWithURL:diskURL
+                                                           readOnly:NO
+                                                              error:error];
+        if (!additionalAttachment) return nil;
+        [storageDevices addObject:
+            [[VZVirtioBlockDeviceConfiguration alloc] initWithAttachment:additionalAttachment]];
+    }
+    config.storageDevices = storageDevices;
     config.graphicsDevices = @[BuildGraphics()];
     config.networkDevices = @[[VzNetwork natConfigurationWithMACAddress:macAddress]];
     config.pointingDevices = @[[[VZMacTrackpadConfiguration alloc] init],

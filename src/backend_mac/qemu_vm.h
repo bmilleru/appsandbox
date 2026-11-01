@@ -40,6 +40,7 @@ typedef void (^QemuVmLog)(NSString *line);
                        vmDir:(NSURL *)vmDir
                        ramMb:(int)ramMb
                     cpuCores:(int)cpuCores
+      additionalDiskPaths:(NSArray<NSString *> *)additionalDiskPaths
                   macAddress:(NSString *)macAddress
                     testMode:(BOOL)testMode;
 

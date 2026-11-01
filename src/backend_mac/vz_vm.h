@@ -27,6 +27,7 @@ void vz_vm_set_no_audio(BOOL no_audio);
                          ramMb:(int)ramMb
                       cpuCores:(int)cpuCores
                     macAddress:(VZMACAddress *)macAddress
+           additionalDiskPaths:(NSArray<NSString *> *)additionalDiskPaths
                          error:(NSError **)error;
 
 /* Build a fresh configuration for install (no disks are loaded from disk.img;

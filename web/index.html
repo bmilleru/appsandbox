@@ -37,6 +37,7 @@
                 <th class="icon-col">&#x2715;&#xFE0F;</th>
                 <th class="icon-col">&#x1F5D1;&#xFE0F;</th>
                 <th class="icon-col">&#x270F;&#xFE0F;</th>
+                <th class="icon-col" title="Add virtual disk">+</th>
             </tr></thead>
             <tbody id="vm-tbody"></tbody>
         </table>
@@ -229,6 +230,18 @@
                     </select>
                 </div>
             </div>
+            <section class="edit-disks-section" aria-labelledby="edit-disks-title">
+                <h4 id="edit-disks-title">Additional virtual disks</h4>
+                <p>Changes are saved immediately and take effect the next time the stopped VM starts. Attached images are used in place. Detaching a disk does not delete its image file. Windows VM snapshots do not include attached data disks.</p>
+                <ul id="edit-disks-list" class="edit-disks-list"></ul>
+                <label for="edit-disk-path">Disk image to attach:</label>
+                <div class="form-row edit-disk-add-row">
+                    <input type="text" id="edit-disk-path" placeholder="Choose an existing disk image..." autocorrect="off" autocapitalize="off" spellcheck="false">
+                    <button id="btn-edit-browse-disk" type="button" onclick="sendCmd('browseExistingDisk')">Browse...</button>
+                    <button id="btn-edit-add-disk" type="button" onclick="addDiskFromEdit()">Attach</button>
+                </div>
+                <span id="edit-disk-warn" class="field-warn" aria-live="polite"></span>
+            </section>
             <span id="edit-vm-warn" class="field-warn" aria-live="polite"></span>
         </div>
         <div class="modal-buttons">
@@ -252,6 +265,25 @@
             <button id="btn-snapshot-rename" onclick="renameSnapshot()">Rename</button>
             <button id="btn-snapshot-delete" class="danger" onclick="deleteSnapshot()">Delete</button>
             <button onclick="closeSnapshotModal()">Close</button>
+        </div>
+    </div>
+</div>
+
+<!-- Add virtual disk modal -->
+<div class="modal-overlay" id="add-disk-overlay">
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="add-disk-title">
+        <h3 id="add-disk-title">Add Virtual Disk</h3>
+        <div class="modal-form-body">
+            <p>Attach an existing disk image in place. Changes are written to the selected file, which is not deleted with the VM. Windows snapshots do not include attached data disks.</p>
+            <label for="add-disk-path">Disk image:</label>
+            <div class="form-row">
+                <input type="text" id="add-disk-path" placeholder="Select an existing disk image..." autocorrect="off" autocapitalize="off" spellcheck="false">
+                <button onclick="sendCmd('browseExistingDisk')">Browse...</button>
+            </div>
+        </div>
+        <div class="modal-buttons">
+            <button onclick="closeAddDiskModal()">Cancel</button>
+            <button class="primary" onclick="submitAddDisk()">Attach Disk</button>
         </div>
     </div>
 </div>

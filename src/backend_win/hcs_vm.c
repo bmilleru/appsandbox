@@ -843,6 +843,26 @@ static BOOL wait_for_file_available(const wchar_t *path, int timeout_ms)
     return FALSE;
 }
 
+static HRESULT prepare_additional_disk_access(const VmConfig *config)
+{
+    int i;
+    if (config->additional_disk_count < 0 ||
+        config->additional_disk_count > ASB_MAX_ADDITIONAL_DISKS)
+        return E_INVALIDARG;
+    for (i = 0; i < config->additional_disk_count; i++) {
+        HRESULT hr;
+        if (!config->additional_disk_paths[i][0] ||
+            GetFileAttributesW(config->additional_disk_paths[i]) == INVALID_FILE_ATTRIBUTES)
+            return HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND);
+        if (!wait_for_file_available(config->additional_disk_paths[i], 3000))
+            return HRESULT_FROM_WIN32(ERROR_SHARING_VIOLATION);
+        if (!pfnGrantAccess) continue;
+        hr = pfnGrantAccess(config->name, config->additional_disk_paths[i]);
+        if (FAILED(hr)) return hr;
+    }
+    return S_OK;
+}
+
 /* Nested virtualization (ExposeVirtualizationExtensions) host-capability gate.
    Mirrors WSL2 (WslCoreVm.cpp / hcs.cpp): query the host's ProcessorCapabilities
    via HcsGetServiceProperties and look for the "NestedVirt" feature string. Only
@@ -893,6 +913,7 @@ BOOL hcs_build_vm_json(const VmConfig *config, const wchar_t *endpoint_guid,
     wchar_t vmrs_esc[MAX_PATH * 2];
     wchar_t iso_section[512];
     wchar_t res_section[512];
+    wchar_t additional_disk_section[8192];
     wchar_t net_section[512];
     wchar_t secureboot_section[512];
     wchar_t nested_section[128];
@@ -930,6 +951,22 @@ BOOL hcs_build_vm_json(const VmConfig *config, const wchar_t *endpoint_guid,
         escape_json_path(config->resources_iso_path, res_esc, MAX_PATH * 2);
         swprintf_s(res_section, 512,
             L",\"2\":{\"Type\":\"Iso\",\"Path\":\"%s\"}", res_esc);
+    }
+
+    additional_disk_section[0] = L'\0';
+    if (config->additional_disk_count < 0 ||
+        config->additional_disk_count > ASB_MAX_ADDITIONAL_DISKS)
+        return FALSE;
+    for (int i = 0; i < config->additional_disk_count; i++) {
+        wchar_t disk_esc[MAX_PATH * 2];
+        size_t used = wcslen(additional_disk_section);
+        if (!config->additional_disk_paths[i][0]) return FALSE;
+        escape_json_path(config->additional_disk_paths[i], disk_esc, ARRAYSIZE(disk_esc));
+        written = swprintf_s(additional_disk_section + used,
+            ARRAYSIZE(additional_disk_section) - used,
+            L",\"%d\":{\"Type\":\"VirtualDisk\",\"Path\":\"%s\"}",
+            i + 3, disk_esc);
+        if (written <= 0) return FALSE;
     }
 
     /* Network adapter — skip for template VMs (no network during template creation) */
@@ -1168,6 +1205,7 @@ BOOL hcs_build_vm_json(const VmConfig *config, const wchar_t *endpoint_guid,
                             L"\"0\":{\"Type\":\"VirtualDisk\",\"Path\":\"%s\"}"
                             L"%s"
                             L"%s"
+                            L"%s"
                         L"}"
                     L"}"
                 L"},"
@@ -1193,6 +1231,7 @@ BOOL hcs_build_vm_json(const VmConfig *config, const wchar_t *endpoint_guid,
         vhdx_esc,
         iso_section,
         res_section,
+        additional_disk_section,
         video_section,
         comports_section,
         service_table,
@@ -1217,6 +1256,11 @@ HRESULT hcs_create_vm(const VmConfig *config, VmInstance *instance)
     if (!wait_for_file_available(config->vhdx_path, 3000)) {
         ui_log(L"Error: VHDX file is still locked. Reboot or kill vmwp.exe in Task Manager.");
         return HRESULT_FROM_WIN32(ERROR_SHARING_VIOLATION);
+    }
+    hr = prepare_additional_disk_access(config);
+    if (FAILED(hr)) {
+        ui_log(L"Error: Cannot access an additional virtual disk (0x%08X).", hr);
+        return hr;
     }
 
     /* Grant VM access to VHDX and ISO files (required by vmwp.exe).
@@ -1311,6 +1355,11 @@ HRESULT hcs_create_vm_with_endpoint(const VmConfig *config, const wchar_t *endpo
     if (!wait_for_file_available(config->vhdx_path, 3000)) {
         ui_log(L"Error: VHDX file is still locked. Reboot or kill vmwp.exe in Task Manager.");
         return HRESULT_FROM_WIN32(ERROR_SHARING_VIOLATION);
+    }
+    hr = prepare_additional_disk_access(config);
+    if (FAILED(hr)) {
+        ui_log(L"Error: Cannot access an additional virtual disk (0x%08X).", hr);
+        return hr;
     }
 
     /* Grant VM access to VHDX and ISO files (required by vmwp.exe).
